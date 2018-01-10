@@ -17,13 +17,12 @@ _parseAndPrint() {
 }
 
 arp_cache() {
-  local arpCommand=$(type -P arp)
+  local ipCommand=$(type -P ip)
 
-  result=$($arpCommand | $AWK 'BEGIN {print "["} NR>1 \
-              {print "{ \"addr\": \"" $1 "\", " \
-                    "\"hw_type\": \"" $2 "\", " \
-                    "\"hw_addr.\": \"" $3 "\", " \
-                    "\"mask\": \"" $5 "\" }, " \
+  result=$($ipCommand neigh | $GREP -v FAILED | $AWK 'BEGIN {print "["} NR>1 \
+              {print "{ \"ip\": \"" $1 "\", " \
+                    "\"mac\": \"" $5 "\", " \
+                    "\"state\": \"" $6 "\" }, " \
                     } \
             END {print "]"}' \
         | $SED 'N;$s/},/}/;P;D')
@@ -248,7 +247,6 @@ download_transfer_rate() {
 }
 
 general_info() {
-  local lsbRelease=$(type -P lsb_release)
   local uName=$(type -P uname)
   local hostName=$(type -P hostname)
 
@@ -257,18 +255,15 @@ general_info() {
     local D=$((T/60/60/24))
     local H=$((T/60/60%24))
     local M=$((T/60%60))
-    local S=$((T%60))
-    [[ $D > 0 ]] && printf '%d days ' $D
-    [[ $H > 0 ]] && printf '%d hours ' $H
-    [[ $M > 0 ]] && printf '%d minutes ' $M
-    [[ $D > 0 || $H > 0 || $M > 0 ]] && printf 'and '
-    printf '%d seconds\n' $S
+    [[ $D > 0 ]] && printf '%d d ' $D
+    [[ $H > 0 ]] && printf '%d h ' $H
+    [[ $M > 0 ]] && printf '%d m\n' $M
   }
 
-  local lsbRelease=$($lsbRelease -ds | $SED -e 's/^"//'  -e 's/"$//')
-  local uname=$($uName -r | $SED -e 's/^"//'  -e 's/"$//')
-  local os=$($ECHO $lsbRelease $uname)
-  local hostname=$($hostName)
+  local kernel=$($uName -r)
+  local system=$($uName -o)
+  local os=$($ECHO $system $kernel)
+  local hostname=$($hostName -f)
   local uptime_seconds=$($CAT /proc/uptime | awk '{print $1}')
   local server_time=$(date)
 
@@ -287,19 +282,23 @@ io_stats() {
 
 ip_addresses() {
 
-  local ifconfigCmd=$(type -P ifconfig)
-  local digCmd=$(type -P dig)
+  local Ifc=$(ip -o link show | $AWK -F': ' '{print $2}')
 
-  externalIp=$($digCmd +short myip.opendns.com @resolver1.opendns.com)
-
-  $ECHO -n "["
-
-  for item in $($ifconfigCmd | $GREP -oP "^[a-zA-Z0-9:]*(?=:)")
+  local result=""
+  
+  while read -r line
   do
-      $ECHO -n "{\"interface\" : \""$item"\", \"ip\" : \"$( $ifconfigCmd $item | $GREP "inet" | $AWK '{match($0,"inet (addr:)?([0-9.]*)",a)}END{ if (NR != 0){print a[2]; exit}{print "none"}}')\"}, "
-  done
+    if [[ ! -z $result ]]; then
+        result="$result, "
+    fi
+    IPv4=$(ip -4 addr show dev $line | grep global | grep inet | $AWK '{print $2}' | $AWK -F/ '{print $1}')
+    IPv6=$(ip -6 addr show dev $line | grep global | grep inet6 | $AWK '{print $2}' | $AWK -F/ '{print $1}')
+    if [[ ! -z $IPv6 || ! -z $IPv4 ]]; then
+        result="$result{ \"interface\": \"$line\", \"ip\": \"$IPv6 $IPv4\" }"
+    fi
+  done <<< $Ifc
 
-  $ECHO "{ \"interface\": \"external\", \"ip\": \"$externalIp\" } ]" | _parseAndPrint
+  $ECHO [ "$result" ] | _parseAndPrint
 }
 
 load_avg() {
@@ -316,9 +315,9 @@ load_avg() {
 }
 
 logged_in_users() {
-  local whoCommand=$(type -P w)
+  local whoCommand=$(type -P who)
 
-  result=$(COLUMNS=300 $whoCommand -h | $AWK '{print "{\"user\": \"" $1 "\", \"from\": \"" $3 "\", \"when\": \"" $4 "\"},"}')
+  result=$(COLUMNS=300 $whoCommand | $SED 's/(//' | $SED 's/)//' | $AWK '{print "{\"user\": \"" $1 "\", \"from\": \"" $5 "\", \"when\": \"" $3,$4 "\"},"}')
 
   $ECHO [ ${result%?} ] | _parseAndPrint
 }
@@ -345,12 +344,13 @@ memory_info() {
 
 network_connections() {
 
-  local netstatCmd=$(type -P netstat)
+  local netstatCmd=$(type -P ss)
   local sortCmd=$(type -P sort)
   local uniqCmd=$(type -P uniq)
 
   $netstatCmd -ntu \
-  | $AWK 'NR>2 {print $5}' \
+  | $AWK 'NR>1 {print $6}' \
+  | $SED 's/:[0-9]*$//' | $SED 's/^\[//' | $SED 's/\]$//' | $SED 's/::ffff://' \
   | $sortCmd \
   | $uniqCmd -c \
   | $AWK 'BEGIN {print "["} {print "{ \"connections\": " $1 ", \"address\": \"" $2 "\" }," } END {print "]"}' \
@@ -381,7 +381,7 @@ ping() {
 	$CAT $CONFIG_PATH \
 	|  while read output
 		do
-		   	singlePing=$($pingCmd -qc 2 $output \
+		   	singlePing=$($pingCmd -qc 2 -i 0.25 $output \
 		    | $AWK -F/ 'BEGIN { endLine="}," } /^rtt/ { if ('$numOfLinesInConfig'==1){endLine="}"} print "{" "\"host\": \"'$output'\", \"ping\": " $5 " " endLine }' \
 		    )
 		    numOfLinesInConfig=$(($numOfLinesInConfig-1))
